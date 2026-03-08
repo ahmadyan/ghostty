@@ -1015,10 +1015,12 @@ const Subprocess = struct {
             .pre_exec = if (builtin.os.tag == .windows) null else (struct {
                 fn callback(cmd: *Command) void {
                     const sp = cmd.getData(Subprocess) orelse unreachable;
-                    sp.childPreExec() catch |err| log.err(
-                        "error initializing child: {}",
-                        .{err},
-                    );
+                    // NOTE: Do NOT use log.err here. This runs in the forked child
+                    // process before exec. On macOS, std.log calls os_log_create which
+                    // uses GCD — not async-signal-safe — causing SIGSEGV crashes.
+                    sp.childPreExec() catch {
+                        _ = std.posix.system.write(2, "error initializing child process\n", 33);
+                    };
                 }
             }).callback,
             .data = self,
