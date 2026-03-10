@@ -46,8 +46,8 @@ const Renderer = rendererpkg.Renderer;
 /// being resized to a size that is too small to be useful. These defaults
 /// are chosen to match the default size of Mac's Terminal.app, but is
 /// otherwise somewhat arbitrary.
-const min_window_width_cells: u32 = 10;
-const min_window_height_cells: u32 = 4;
+pub const min_window_width_cells: u32 = 10;
+pub const min_window_height_cells: u32 = 4;
 
 /// The maximum number of key tables that can be active at any
 /// given time. `activate_key_table` calls after this are ignored.
@@ -312,6 +312,7 @@ const DerivedConfig = struct {
     mouse_reporting: bool,
     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
     mouse_shift_capture: configpkg.MouseShiftCapture,
+    fullscreen: configpkg.Fullscreen,
     macos_non_native_fullscreen: configpkg.NonNativeFullscreen,
     macos_option_as_alt: ?input.OptionAsAlt,
     selection_clear_on_copy: bool,
@@ -389,6 +390,7 @@ const DerivedConfig = struct {
             .mouse_reporting = config.@"mouse-reporting",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
             .mouse_shift_capture = config.@"mouse-shift-capture",
+            .fullscreen = config.fullscreen,
             .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
             .macos_option_as_alt = config.@"macos-option-as-alt",
             .selection_clear_on_copy = config.@"selection-clear-on-copy",
@@ -605,10 +607,14 @@ pub fn init(
     };
 
     // The command we're going to execute
-    const command: ?configpkg.Command = if (app.first)
-        config.@"initial-command" orelse config.command
-    else
-        config.command;
+    const command: ?configpkg.Command = command: {
+        if (app.first) {
+            if (config.@"initial-command") |command| {
+                break :command command;
+            }
+        }
+        break :command config.command;
+    };
 
     // Start our IO implementation
     // This separate block ({}) is important because our errdefers must
@@ -632,19 +638,12 @@ pub fn init(
             .env_override = config.env,
             .shell_integration = config.@"shell-integration",
             .shell_integration_features = config.@"shell-integration-features",
+            .cursor_blink = config.@"cursor-style-blink",
             .working_directory = config.@"working-directory",
             .resources_dir = global_state.resources_dir.host(),
             .term = config.term,
-
-            // Get the cgroup if we're on linux and have the decl. I'd love
-            // to change this from a decl to a surface options struct because
-            // then we can do memory management better (don't need to retain
-            // the string around).
-            .linux_cgroup = if (comptime builtin.os.tag == .linux and
-                @hasDecl(apprt.runtime.Surface, "cgroup"))
-                rt_surface.cgroup()
-            else
-                Command.linux_cgroup_default,
+            .rt_pre_exec_info = .init(config),
+            .rt_post_fork_info = .init(config),
         });
         errdefer io_exec.deinit();
 
@@ -1181,7 +1180,7 @@ fn selectionScrollTick(self: *Surface) !void {
     }
 
     // Scroll the viewport as required
-    try t.scrollViewport(.{ .delta = delta });
+    t.scrollViewport(.{ .delta = delta });
 
     // Next, trigger our drag behavior
     const pin = t.screens.active.pages.pin(.{
@@ -2786,7 +2785,7 @@ pub fn keyCallback(
             try self.setSelection(null);
         }
 
-        if (self.config.scroll_to_bottom.keystroke) try self.io.terminal.scrollViewport(.bottom);
+        if (self.config.scroll_to_bottom.keystroke) self.io.terminal.scrollViewport(.bottom);
 
         try self.queueRender();
     }
@@ -2978,6 +2977,9 @@ fn maybeHandleBinding(
         // If our action was "ignore" then we return the special input
         // effect of "ignored".
         for (actions) |action| if (action == .ignore) {
+            // If we're in a sequence, clear it.
+            self.endKeySequence(.drop, .retain);
+
             return .ignored;
         };
     }
@@ -3539,7 +3541,7 @@ pub fn scrollCallback(
             // Modify our viewport, this requires a lock since it affects
             // rendering. We have to switch signs here because our delta
             // is negative down but our viewport is positive down.
-            try self.io.terminal.scrollViewport(.{ .delta = y.delta * -1 });
+            self.io.terminal.scrollViewport(.{ .delta = y.delta * -1 });
         }
     }
 
@@ -4273,6 +4275,9 @@ fn maybePromptClick(self: *Surface) !bool {
     // If our screen doesn't handle any prompt clicks, then we never
     // do anything.
     if (screen.semantic_prompt.click == .none) return false;
+
+    // If cursor-click-to-move is disabled, we don't do any prompt clicking.
+    if (!self.config.cursor_click_to_move) return false;
 
     // If our cursor isn't currently at a prompt then we don't handle
     // prompt clicks because we can't move if we're not in a prompt!
@@ -5070,7 +5075,7 @@ pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordin
 ///
 /// Precondition: the render_state mutex must be held.
 fn scrollToBottom(self: *Surface) !void {
-    try self.io.terminal.scrollViewport(.{ .bottom = {} });
+    self.io.terminal.scrollViewport(.{ .bottom = {} });
     try self.queueRender();
 }
 
@@ -5398,20 +5403,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             return false;
         },
 
-        .copy_title_to_clipboard => {
-            const title = self.rt_surface.getTitle() orelse return false;
-            if (title.len == 0) return false;
-
-            self.rt_surface.setClipboard(.standard, &.{.{
-                .mime = "text/plain",
-                .data = title,
-            }}, false) catch |err| {
-                log.err("error copying title to clipboard err={}", .{err});
-                return true;
-            };
-
-            return true;
-        },
+        .copy_title_to_clipboard => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .copy_title_to_clipboard,
+            {},
+        ),
 
         .paste_from_clipboard => return try self.startClipboardRequest(
             .standard,

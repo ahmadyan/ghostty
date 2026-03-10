@@ -50,10 +50,11 @@ pub const App = struct {
         /// Callback called to handle an action.
         action: *const fn (*App, apprt.Target.C, apprt.Action.C) callconv(.c) bool,
 
-        /// Read the clipboard value. The return value must be preserved
-        /// by the host until the next call. If there is no valid clipboard
-        /// value then this should return null.
-        read_clipboard: *const fn (SurfaceUD, c_int, *apprt.ClipboardRequest) callconv(.c) void,
+        /// Read the clipboard value. Returns true if the clipboard request
+        /// was started and complete_clipboard_request may be called with the
+        /// given state pointer. Returns false if the clipboard request couldn't
+        /// be started (such as when no text is available for a paste request).
+        read_clipboard: *const fn (SurfaceUD, c_int, *apprt.ClipboardRequest) callconv(.c) bool,
 
         /// This may be called after a read clipboard call to request
         /// confirmation that the clipboard value is safe to read. The embedder
@@ -672,14 +673,16 @@ pub const Surface = struct {
         errdefer alloc.destroy(state_ptr);
         state_ptr.* = state;
 
-        self.app.opts.read_clipboard(
+        const started = self.app.opts.read_clipboard(
             self.userdata,
             @intCast(@intFromEnum(clipboard_type)),
             state_ptr,
         );
+        if (!started) {
+            alloc.destroy(state_ptr);
+            return false;
+        }
 
-        // Embedded apprt can't synchronously check clipboard content types,
-        // so we always return true to indicate the request was started.
         return true;
     }
 
@@ -848,7 +851,7 @@ pub const Surface = struct {
         mods: input.Mods,
     ) void {
         // Convert our unscaled x/y to scaled.
-        self.cursor_pos = self.cursorPosToPixels(.{
+        const pos = self.cursorPosToPixels(.{
             .x = @floatCast(x),
             .y = @floatCast(y),
         }) catch |err| {
@@ -858,6 +861,19 @@ pub const Surface = struct {
             );
             return;
         };
+
+        // There are cases where the platform reports a mouse motion event
+        // without the cursor actually moving. For example, on macOS, updating
+        // the window title can trigger a phantom mouse-move event at the same
+        // coordinates. This can cause the mouse to incorrectly unhide when
+        // mouse-hide-while-typing is enabled (commonly seen with TUI apps
+        // like Zellij that frequently update the title). To prevent incorrect
+        // behavior, we only continue with callback logic if the cursor has
+        // actually moved.
+        if (@abs(self.cursor_pos.x - pos.x) < 1 and
+            @abs(self.cursor_pos.y - pos.y) < 1) return;
+
+        self.cursor_pos = pos;
 
         self.core_surface.cursorPosCallback(self.cursor_pos, mods) catch |err| {
             log.err("error in cursor pos callback err={}", .{err});
