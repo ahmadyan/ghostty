@@ -45,6 +45,10 @@ extension Ghostty {
             self.init(config: ghostty_config_clone(config))
         }
 
+        func clone(config: ghostty_config_t) {
+            self.config = config
+        }
+
         deinit {
             self.config = nil
         }
@@ -53,7 +57,7 @@ extension Ghostty {
         /// - Parameters:
         ///   - path: An optional preferred config file path. Pass `nil` to load the default configuration files.
         ///   - finalize: Whether to finalize the configuration to populate default values.
-        static private func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
+        static func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
             // Initialize the global configuration.
             guard let cfg = ghostty_config_new() else {
                 logger.critical("ghostty_config_new failed")
@@ -705,6 +709,16 @@ extension Ghostty {
             return MacShortcuts(rawValue: str) ?? defaultValue
         }
 
+        var abnormalCommandExitRuntime: Duration {
+            let defaultValue: Duration = .milliseconds(250)
+            guard let config = self.config else { return defaultValue }
+            var v: UInt32?
+            let key = "abnormal-command-exit-runtime"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
+            guard let v else { return defaultValue }
+            return .milliseconds(v)
+        }
+
         var scrollbar: Scrollbar {
             let defaultValue = Scrollbar.system
             guard let config = self.config else { return defaultValue }
@@ -724,6 +738,14 @@ extension Ghostty {
             guard v.len > 0 else { return [] }
             let buffer = UnsafeBufferPointer(start: v.commands, count: v.len)
             return buffer.map { Ghostty.Command(cValue: $0) }
+        }
+
+        var progressStyle: Bool {
+            guard let config = self.config else { return true }
+            var v = true
+            let key = "progress-style"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
         }
     }
 }
