@@ -218,9 +218,12 @@ fn startPosix(self: *Command, arena: Allocator) !void {
     // any failures are ignored (its best effort).
     global_state.rlimits.restore();
 
-    // If there are pre exec callbacks, call them now.
-    if (self.os_pre_exec) |f| if (f(self)) |exitcode| posix.exit(exitcode);
-    if (self.rt_pre_exec) |f| if (f(self)) |exitcode| posix.exit(exitcode);
+    // If there are pre exec callbacks, call them now. Use the raw _exit(2)
+    // syscall rather than posix.exit() — we are in the post-fork child and
+    // posix.exit() runs atexit handlers / flushes buffers, which is not
+    // async-signal-safe across fork and can deadlock or corrupt state.
+    if (self.os_pre_exec) |f| if (f(self)) |exitcode| std.c._exit(@as(c_int, exitcode));
+    if (self.rt_pre_exec) |f| if (f(self)) |exitcode| std.c._exit(@as(c_int, exitcode));
 
     // Finally, replace our process.
     // Note: we must use the "p"-variant of exec here because we

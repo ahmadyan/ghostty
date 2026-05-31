@@ -97,8 +97,9 @@ pub fn threadEnter(
         if (err != error.ExecFailedInChild) return err;
 
         // We're in the child. Nothing more we can do but abnormal exit.
-        // The Command will output some additional information.
-        posix.exit(1);
+        // The Command will output some additional information. Use the raw
+        // _exit(2) syscall — posix.exit() is not async-signal-safe post-fork.
+        std.c._exit(1);
     };
     errdefer self.subprocess.stop();
 
