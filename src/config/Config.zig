@@ -1425,6 +1425,20 @@ link: RepeatableLink = .{},
 /// `link`). If you want to customize URL matching, use `link` and disable this.
 @"link-url": bool = true,
 
+/// How the built-in URL matcher (`link-url`) decides when a matched URL is
+/// highlighted and clickable.
+///
+///   * `hover` - Highlight and make the URL clickable whenever the mouse
+///     hovers over it, with no modifier key required. (default)
+///   * `hover-mods` - Only highlight and click while hovering with the link
+///     modifier held: control on Linux, command (super) on macOS. This is the
+///     traditional terminal behavior.
+///   * `always` - Always highlight every matched URL; clicking still requires
+///     hovering, with no modifier key.
+///
+/// This only affects the built-in matcher enabled by `link-url`.
+@"link-url-highlight": LinkUrlHighlight = .hover,
+
 /// Show link previews for a matched URL.
 ///
 /// When true, link previews are shown for all matched URLs. When false, link
@@ -4684,8 +4698,18 @@ pub fn finalize(self: *Config) !void {
     if (self.@"window-height" > 0) self.@"window-height" = @max(4, self.@"window-height");
 
     // If URLs are disabled, cut off the first link. The first link is
-    // always the URL matcher.
-    if (!self.@"link-url") self.link.links.items = self.link.links.items[1..];
+    // always the URL matcher. Otherwise, apply the configured highlight
+    // mode (`link-url-highlight`) to that URL matcher so it can be made
+    // clickable without a modifier key.
+    if (!self.@"link-url") {
+        self.link.links.items = self.link.links.items[1..];
+    } else if (self.link.links.items.len > 0) {
+        self.link.links.items[0].highlight = switch (self.@"link-url-highlight") {
+            .hover => .{ .hover = {} },
+            .@"hover-mods" => .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
+            .always => .{ .always = {} },
+        };
+    }
 
     // We warn when the quit-after-last-window-closed-delay is set to a very
     // short value because it can cause Ghostty to quit before the first
@@ -5283,6 +5307,13 @@ pub const LinkPreviews = enum {
     false,
     true,
     osc8,
+};
+
+/// See `link-url-highlight`.
+pub const LinkUrlHighlight = enum {
+    hover,
+    @"hover-mods",
+    always,
 };
 
 /// See working-directory
