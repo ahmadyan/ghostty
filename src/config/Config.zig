@@ -3895,6 +3895,31 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
     return result;
 }
 
+test "link-url-highlight: default makes URLs clickable without modifiers" {
+    var cfg = try default(std.testing.allocator);
+    defer cfg.deinit();
+    try cfg.finalize();
+    try std.testing.expect(cfg.link.links.items.len >= 1);
+    // The default URL matcher highlights/clicks on plain hover (no ctrl/super).
+    try std.testing.expect(cfg.link.links.items[0].highlight == .hover);
+}
+
+test "link-url-highlight: hover-mods restores the modifier gate" {
+    var cfg = try default(std.testing.allocator);
+    defer cfg.deinit();
+    cfg.@"link-url-highlight" = .@"hover-mods";
+    try cfg.finalize();
+    try std.testing.expect(cfg.link.links.items[0].highlight == .hover_mods);
+}
+
+test "link-url-highlight: always highlights URLs unconditionally" {
+    var cfg = try default(std.testing.allocator);
+    defer cfg.deinit();
+    cfg.@"link-url-highlight" = .always;
+    try cfg.finalize();
+    try std.testing.expect(cfg.link.links.items[0].highlight == .always);
+}
+
 /// Load configuration from an iterator that yields values that look like
 /// command-line arguments, i.e. `--key=value`.
 pub fn loadIter(
