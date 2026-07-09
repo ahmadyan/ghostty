@@ -1153,6 +1153,20 @@ const Subprocess = struct {
         }
     }
 
+    /// How long the process group gets to exit on SIGHUP before we escalate
+    /// to SIGKILL, and how long we wait after SIGKILL before abandoning the
+    /// wait entirely. Interactive TUI processes (coding agents, editors) and
+    /// login(1) routinely catch or ignore SIGHUP; without escalation the loop
+    /// below — and, transitively, the surface teardown that joins the io
+    /// thread (ghostty_surface_free on the embedder's main thread) — parks
+    /// until the child exits on its own (observed in the wild: 44 minutes).
+    /// SIGKILL cannot be caught; the only thing that survives it is a process
+    /// in uninterruptible kernel sleep, so past the second deadline we
+    /// abandon the wait (leaving a zombie) rather than block forever.
+    const kill_sighup_grace_ns: u64 = 500 * std.time.ns_per_ms;
+    const kill_sigkill_deadline_ns: u64 = 5 * std.time.ns_per_s;
+    const kill_poll_interval_ns: u64 = 10 * std.time.ns_per_ms;
+
     fn killPid(pid: c.pid_t) !void {
         const pgid = getpgid(pid) orelse return;
 
@@ -1163,9 +1177,23 @@ const Subprocess = struct {
         // and repeatedly kill the process group until all
         // descendents are well and truly dead. We will not rest
         // until the entire family tree is obliterated.
+        var elapsed_ns: u64 = 0;
+        var escalated = false;
         while (true) {
-            switch (posix.errno(c.killpg(pgid, c.SIGHUP))) {
-                .SUCCESS => log.debug("process group killed pgid={}", .{pgid}),
+            var sig: c_int = c.SIGHUP;
+            if (elapsed_ns >= kill_sighup_grace_ns) {
+                sig = c.SIGKILL;
+                if (!escalated) {
+                    escalated = true;
+                    log.warn("process group ignored SIGHUP for {}ms, escalating to SIGKILL pgid={}", .{
+                        kill_sighup_grace_ns / std.time.ns_per_ms,
+                        pgid,
+                    });
+                }
+            }
+
+            switch (posix.errno(c.killpg(pgid, sig))) {
+                .SUCCESS => log.debug("process group killed pgid={} sig={}", .{ pgid, sig }),
                 else => |err| killpg: {
                     if ((comptime builtin.target.os.tag.isDarwin()) and
                         err == .PERM)
@@ -1186,7 +1214,17 @@ const Subprocess = struct {
             const res = posix.waitpid(pid, std.c.W.NOHANG);
             log.debug("waitpid result={}", .{res.pid});
             if (res.pid != 0) break;
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+
+            // Bounded wait: a child that survives SIGKILL is stuck in
+            // uninterruptible kernel sleep. Abandoning it leaks a zombie,
+            // which beats blocking surface teardown indefinitely.
+            if (elapsed_ns >= kill_sighup_grace_ns + kill_sigkill_deadline_ns) {
+                log.err("process pid={} still alive after SIGKILL; abandoning wait", .{pid});
+                return error.KillTimeout;
+            }
+
+            std.Thread.sleep(kill_poll_interval_ns);
+            elapsed_ns += kill_poll_interval_ns;
         }
     }
 
@@ -1202,9 +1240,18 @@ const Subprocess = struct {
         // FIRST thing the child process does and as far as I can tell,
         // setsid cannot fail. I'm sure that's not true, but I'd rather
         // have a bug reported than defensively program against it now.
+        var attempts_remaining: usize = 100;
         while (true) {
             const pgid = c.getpgid(pid);
             if (pgid == my_pgid) {
+                // Bounded: a child that died before setsid keeps our pgid as
+                // a zombie, and this retry used to spin forever. Give up
+                // after ~1s and skip the kill rather than hang the caller.
+                if (attempts_remaining == 0) {
+                    log.warn("pgid still ours after retries; skipping kill", .{});
+                    return null;
+                }
+                attempts_remaining -= 1;
                 log.warn("pgid is our own, retrying", .{});
                 std.Thread.sleep(10 * std.time.ns_per_ms);
                 continue;
