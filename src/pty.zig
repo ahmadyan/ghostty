@@ -254,8 +254,12 @@ const PosixPty = struct {
         // Set controlling terminal
         switch (posix.errno(c.ioctl(self.slave, c.TIOCSCTTY, @as(c_ulong, 0)))) {
             .SUCCESS => {},
-            else => |err| {
-                log.err("error setting controlling terminal errno={}", .{err});
+            else => {
+                // NOTE: Do NOT use log.err here. This runs in the forked child
+                // process before exec. On macOS, std.log calls os_log_create which
+                // uses GCD — not async-signal-safe — causing SIGSEGV crashes.
+                const msg = "error setting controlling terminal\n";
+                _ = std.c.write(2, msg, msg.len);
                 return error.SetControllingTerminalFailed;
             },
         }
