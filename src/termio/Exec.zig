@@ -98,8 +98,10 @@ pub fn threadEnter(
         if (err != error.ExecFailedInChild) return err;
 
         // We're in the child. Nothing more we can do but abnormal exit.
-        // The Command will output some additional information.
-        std.process.exit(1);
+        // The Command will output some additional information. Use the raw
+        // _exit(2) syscall: std.process.exit() runs atexit handlers and
+        // flushes stdio, which is not async-signal-safe after fork.
+        std.c._exit(1);
     };
     errdefer self.subprocess.stop();
 
@@ -1038,10 +1040,14 @@ const Subprocess = struct {
                     const f = struct {
                         fn callback(cmd: *Command) ?u8 {
                             const sp = cmd.getData(Subprocess) orelse unreachable;
-                            sp.childPreExec() catch |err| log.err(
-                                "error initializing child: {}",
-                                .{err},
-                            );
+                            // NOTE: Do NOT use log.err here. This runs in the
+                            // forked child before exec. On macOS, std.log calls
+                            // os_log_create which uses GCD — not
+                            // async-signal-safe — causing SIGSEGV crashes.
+                            sp.childPreExec() catch {
+                                const msg = "error initializing child process\n";
+                                _ = std.c.write(2, msg, msg.len);
+                            };
                             return null;
                         }
                     };
